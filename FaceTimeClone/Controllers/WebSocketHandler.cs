@@ -7,12 +7,14 @@ namespace FaceTimeClone.Controllers
 {
     public class WebSocketHandler
     {
-        static public ConcurrentDictionary<Guid, WebSocket> _sockets = new();
+        static public ConcurrentDictionary<Guid, ( WebSocket Socket, string? username )> _sockets = new();
+        static public Dictionary<string, Guid> userNameToGuid = new();
         public async Task HandleAsync(WebSocket webSocket)
         {
 
             var id = Guid.NewGuid();
-            _sockets.TryAdd(id, webSocket);
+            
+            _sockets.TryAdd(id, (webSocket, null));
             var buffer = new byte[1024 * 4];
 
 
@@ -21,7 +23,7 @@ namespace FaceTimeClone.Controllers
                 int socketTest = 0;
                 foreach (var socketDictItem in _sockets)
                 {
-                    if (socketDictItem.Value.State == WebSocketState.Open)
+                    if (socketDictItem.Value.Socket.State == WebSocketState.Open)
                     {
                         socketTest++;
                     }
@@ -45,9 +47,30 @@ namespace FaceTimeClone.Controllers
 
 
 
-                        if (IsValidMessage("send", message, out string recipementGUID, out string data))
+                        if (IsSendMessage(message, out string recipementGUID, out string data))
                         {
                             System.Diagnostics.Debug.WriteLine($"recipementGUID: {recipementGUID}, data: {data}");
+
+                            System.Diagnostics.Debug.WriteLine($"Broadcasting: {message}");
+                            WebSocket recipementSocket = _sockets[userNameToGuid[recipementGUID]].Socket;
+                                if (recipementSocket.State == WebSocketState.Open)
+                                {
+                                    await recipementSocket.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
+                                }
+                            
+                        }
+                        else if (IsRegisterMessage(message, out string userName, out bool userNameCorrect))
+                        {
+                            System.Diagnostics.Debug.WriteLine($"userName: {userName}, userNameCorrect: {userNameCorrect}");
+
+                            if (true)
+                            {
+                                System.Diagnostics.Debug.WriteLine($"userName set");
+                                _sockets[id] = (webSocket, userName);
+                                userNameToGuid.Add(userName, id);
+                            }
+
+
                         }
                         else if (message == "broadcast")
                         {
@@ -95,9 +118,9 @@ namespace FaceTimeClone.Controllers
             System.Diagnostics.Debug.WriteLine($"Broadcasting: {message}");
             foreach (var socketDictItem in _sockets)
             {
-                if (socketDictItem.Value.State == WebSocketState.Open)
+                if (socketDictItem.Value.Socket.State == WebSocketState.Open)
                 {
-                    await socketDictItem.Value.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
+                    await socketDictItem.Value.Socket.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
                 }
                 else
                 {
@@ -106,8 +129,29 @@ namespace FaceTimeClone.Controllers
             }
         }
 
-        static bool IsValidMessage(string functionName, string input, out string part1, out string part2)
+        static bool IsRegisterMessage(string input, out string userName, out bool userNameCorrect)
         {
+            const string FUNCITON_NAME = "register";
+            userName = null;
+            userNameCorrect = false;
+
+            if (string.IsNullOrWhiteSpace(input))
+                return false;
+
+            string[] parts = input.Split(':');
+
+            if (parts.Length == 2 && parts[0] == FUNCITON_NAME)
+            {
+                userName = parts[1];
+                return true;
+            }
+
+            return false;
+        }
+
+        static bool IsSendMessage(string input, out string part1, out string part2)
+        {
+            const string FUNCTION_NAME = "send";
             part1 = null;
             part2 = null;
 
@@ -116,7 +160,7 @@ namespace FaceTimeClone.Controllers
 
             string[] parts = input.Split(':');
 
-            if (parts.Length == 3 && parts[0] == functionName)
+            if (parts.Length == 3 && parts[0] == FUNCTION_NAME)
             {
                 part1 = parts[1];
                 part2 = parts[2];
