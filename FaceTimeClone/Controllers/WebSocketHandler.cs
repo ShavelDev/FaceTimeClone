@@ -1,6 +1,8 @@
 ﻿using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
+using System.Timers;
 
 
 namespace FaceTimeClone.Controllers
@@ -8,11 +10,15 @@ namespace FaceTimeClone.Controllers
     public class WebSocketHandler
     {
         static public ConcurrentDictionary<Guid, ( WebSocket Socket, string? username )> _sockets = new();
-        static public Dictionary<string, Guid> userNameToGuid = new();
+        static public ConcurrentDictionary<string, Guid> userNameToGuid = new();
+
+
         public async Task HandleAsync(WebSocket webSocket)
         {
 
             var id = Guid.NewGuid();
+            string socketsUserName = "";
+
             
             _sockets.TryAdd(id, (webSocket, null));
             var buffer = new byte[1024 * 4];
@@ -45,6 +51,10 @@ namespace FaceTimeClone.Controllers
                         System.Diagnostics.Debug.WriteLine($"Received message: {message}");
                         System.Diagnostics.Debug.WriteLine($"messages length: {message.Length}\n");
 
+                        var messJson = JsonSerializer.Deserialize < Dictionary<string, object>>(message);
+
+                        
+
 
 
                         if (IsSendMessage(message, out string recipementGUID, out string data))
@@ -53,23 +63,52 @@ namespace FaceTimeClone.Controllers
 
                             System.Diagnostics.Debug.WriteLine($"Broadcasting: {message}");
                             WebSocket recipementSocket = _sockets[userNameToGuid[recipementGUID]].Socket;
-                                if (recipementSocket.State == WebSocketState.Open)
-                                {
-                                    await recipementSocket.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
-                                }
+                            // TODO: fix indentation
+                            if (recipementSocket.State == WebSocketState.Open)
+                            {
+                                await recipementSocket.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
+                            }
                             
                         }
-                        else if (IsRegisterMessage(message, out string userName, out bool userNameCorrect))
+                        else if (IsRegisterMessage(message, out string userName))
                         {
-                            System.Diagnostics.Debug.WriteLine($"userName: {userName}, userNameCorrect: {userNameCorrect}");
+                            System.Diagnostics.Debug.WriteLine($"userName: {userName}");
 
-                            if (true)
+
+                            if(userNameToGuid.ContainsKey(userName) && _sockets[userNameToGuid[userName]].Socket.State == WebSocketState.Open)
                             {
-                                System.Diagnostics.Debug.WriteLine($"userName set");
-                                _sockets[id] = (webSocket, userName);
-                                userNameToGuid.Add(userName, id);
+                                    await webSocket.SendAsync(Encoding.UTF8.GetBytes("error:usernamenotavaible"), WebSocketMessageType.Text, true, CancellationToken.None);
+
+                            }
+                            else
+                            {
+                                if (userNameToGuid.ContainsKey(userName))
+                                {
+                                    _sockets.TryRemove(userNameToGuid[userName], out _);
+                                }
+                                userNameToGuid[userName] = id;
                             }
 
+                            System.Diagnostics.Debug.WriteLine($"userName set");
+                            _sockets[id] = (webSocket, userName);
+                            socketsUserName = userName;
+                            userNameToGuid[userName] = id;
+
+
+
+                            var usernames = _sockets.Values
+                                .Where(v => v.Socket != null
+                                            && v.Socket.State == WebSocketState.Open
+                                            && !string.IsNullOrWhiteSpace(v.username))
+                                .Select(v => v.username)
+                                .ToArray();
+
+
+                            var obj = new {users = usernames};
+                            string welcomeString = $"welcome:{JsonSerializer.Serialize(obj)}";
+                            await webSocket.SendAsync(Encoding.UTF8.GetBytes(welcomeString), WebSocketMessageType.Text, true, CancellationToken.None);
+
+                            await BroadcastAsync($"newuser:{userName}");
 
                         }
                         else if (message == "broadcast")
@@ -86,16 +125,23 @@ namespace FaceTimeClone.Controllers
                                 WebSocketMessageType.Text,
                                 true,
                                 CancellationToken.None);
+
+
                         }
                     }
                     else if (result.MessageType == WebSocketMessageType.Close)
                     {
                         _sockets.TryRemove(id, out var removedSocket);
+                        userNameToGuid.TryRemove(socketsUserName, out var _);
+                        await BroadcastAsync("$userLeft:");
+
+                        
                         System.Diagnostics.Debug.WriteLine("Closing WebSocket...");
                         await webSocket.CloseAsync(
                             WebSocketCloseStatus.NormalClosure,
-                            "Closedq by server",
+                            "Closed by server",
                             CancellationToken.None);
+
                     }
                 }
             }
@@ -103,11 +149,20 @@ namespace FaceTimeClone.Controllers
             {
                 System.Diagnostics.Debug.WriteLine($"Socket Exception caught: {err.Message}");
                 _sockets.TryRemove(id, out var removedSocket);
+                userNameToGuid.TryRemove(socketsUserName, out var _);
+
+                await webSocket.CloseAsync(WebSocketCloseStatus.InternalServerError,
+                            "Closed by server",
+                            CancellationToken.None);
             }
             catch (Exception err)
             {
                 System.Diagnostics.Debug.WriteLine($"Exception caught: {err.Message}");
                 _sockets.TryRemove(id, out var removedSocket);
+                userNameToGuid.TryRemove(socketsUserName, out var _);
+                await webSocket.CloseAsync(WebSocketCloseStatus.InternalServerError,
+                    "Closed by server",
+                    CancellationToken.None);
             }
 
 
@@ -122,18 +177,19 @@ namespace FaceTimeClone.Controllers
                 {
                     await socketDictItem.Value.Socket.SendAsync(Encoding.UTF8.GetBytes(message), WebSocketMessageType.Text, true, CancellationToken.None);
                 }
-                else
-                {
-                    _sockets.TryRemove(socketDictItem.Key, out var removedSocket);
-                }
+
+                // might cause problems
+                //else
+                //{
+                //    _sockets.TryRemove(socketDictItem.Key, out var removedSocket);
+                //}
             }
         }
 
-        static bool IsRegisterMessage(string input, out string userName, out bool userNameCorrect)
+        static bool IsRegisterMessage(string input, out string userName)
         {
             const string FUNCITON_NAME = "register";
-            userName = null;
-            userNameCorrect = false;
+            userName = "";
 
             if (string.IsNullOrWhiteSpace(input))
                 return false;
@@ -142,7 +198,9 @@ namespace FaceTimeClone.Controllers
 
             if (parts.Length == 2 && parts[0] == FUNCITON_NAME)
             {
+
                 userName = parts[1];
+
                 return true;
             }
 
@@ -152,8 +210,8 @@ namespace FaceTimeClone.Controllers
         static bool IsSendMessage(string input, out string part1, out string part2)
         {
             const string FUNCTION_NAME = "send";
-            part1 = null;
-            part2 = null;
+            part1 = "";
+            part2 = "";
 
             if (string.IsNullOrWhiteSpace(input))
                 return false;
